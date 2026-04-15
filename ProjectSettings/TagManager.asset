@@ -2,11 +2,10 @@
 %TAG !u! tag:unity3d.com,2011:
 --- !u!78 &1
 TagManager:
-  serializedVersion: 2
+  serializedVersion: 3
   tags:
   - agent
   - iWall
-  - wall
   - pit
   - frozenAgent
   - ball
@@ -19,7 +18,6 @@ TagManager:
   - pyramid
   - switchOn
   - stone
-  - target
   - badFood
   - food
   - walkableSurface
@@ -30,6 +28,8 @@ TagManager:
   - purpleAgent
   - purpleGoal
   - tile
+  - Wall
+  - Target
   layers:
   - Default
   - TransparentFX
@@ -67,3 +67,5 @@ TagManager:
   - name: Default
     uniqueID: 0
     locked: 0
+  m_RenderingLayers:
+  - Default

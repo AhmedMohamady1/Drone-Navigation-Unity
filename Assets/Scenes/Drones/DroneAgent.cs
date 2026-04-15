@@ -63,6 +63,7 @@ public class DroneAgent : Agent
     public float headingAlignmentRewardScale = 0.0035f;
     public float excessYawRateThreshold      = 3.0f;
     public float excessYawRatePenaltyScale   = 0.0003f;
+    public float choppyMovementPenalty       = -0.0001f;
 
     [Header("Episode Recording")]
     public bool saveEpisodeResults = true;
@@ -90,6 +91,7 @@ public class DroneAgent : Agent
     private float           _timeSinceRepath = 0f;
     private int             _episodeCount    = 0;
     private int             _exploredLastStep = 0;
+    private float[]         _prevActions     = new float[4];
 
     private void ApplySharedPhysicsSettings()
     {
@@ -340,6 +342,20 @@ public class DroneAgent : Agent
         float mz = actions.ContinuousActions[2];
         float rz = actions.ContinuousActions[3];
 
+        if (_episodeCount > 0)
+        {
+            float actionDiff = 0f;
+            for (int i = 0; i < 4; i++)
+            {
+                actionDiff += Mathf.Abs(actions.ContinuousActions[i] - _prevActions[i]);
+            }
+            AddReward(actionDiff * choppyMovementPenalty); // choppyMovementPenalty is negative
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            _prevActions[i] = actions.ContinuousActions[i];
+        }
+
         _sharedPhysics.SetControlInput(new Vector2(mx, mz), my, rz);
         _sharedPhysics.SimulateStep();
 
@@ -421,14 +437,14 @@ public class DroneAgent : Agent
 
         try
         {
-            if (other.CompareTag("Wall") || other.CompareTag("Target"))
-            {
-                transform.localRotation = _initRotation;
-                _rb.angularVelocity     = Vector3.zero;
-            }
+            // 1. Remove the block that forces localRotation = _initRotation on "Wall"
 
             if (other.CompareTag("Target"))
             {
+                // Reset rotation ONLY when hitting the target, as the episode ends anyway
+                transform.localRotation = _initRotation;
+                _rb.angularVelocity     = Vector3.zero;
+
                 if (mazeDensity == null)
                 {
                     Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET reached!");
@@ -445,6 +461,8 @@ public class DroneAgent : Agent
             else if (other.CompareTag("Wall"))
             {
                 Debug.Log($"[DroneAgent] Episode {_episodeCount}: Wall collision.");
+                
+                // Just add the penalty. The drone will bounce off naturally.
                 AddReward(wallPenalty);
             }
         }
