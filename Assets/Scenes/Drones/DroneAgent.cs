@@ -52,6 +52,7 @@ public class DroneAgent : Agent
     public bool  useAStarPathfinding        = true;
     public float pathRecalculationInterval  = 2f;
     public float waypointReachedDistance    = 1f;
+    public float targetReachedRadius        = 7.0f;
 
     [Header("Rewards")]
     public float stepPenalty            = -0.0003f;
@@ -92,6 +93,7 @@ public class DroneAgent : Agent
     private int             _episodeCount    = 0;
     private int             _exploredLastStep = 0;
     private float[]         _prevActions     = new float[4];
+    private bool            _wallCollisionEndedEpisode = false;
 
     private void ApplySharedPhysicsSettings()
     {
@@ -197,30 +199,44 @@ public class DroneAgent : Agent
 
         _episodeCount++;
 
-        if (mazeDensity != null)
+        if (!_wallCollisionEndedEpisode)
         {
-            mazeDensity.RebuildImmediate();
-            // Start Room placement
-            Vector3 startPos = mazeDensity.GetStartRoomCentre();
-            transform.localPosition = startPos;
-            
-            // Target Room placement (could be unrendered visually initially)
-            Vector3 exitPos = mazeDensity.GetExitRoomCentre();
-            target.localPosition = exitPos;
-        }
-        else
-        {
-            // Reset drone to the origin of its own environment root (local space).
-            transform.localPosition = new Vector3(8f, -13f, -10f);
+            if (mazeDensity != null)
+            {
+                mazeDensity.RebuildImmediate();
+
+                MeshGenerator meshGen = null;
+                if (_envRoot != null)
+                    meshGen = _envRoot.GetComponentInChildren<MeshGenerator>();
+                
+                if (meshGen != null)
+                    meshGen.RequestMeshUpdate();
+
+                // Start Room placement
+                Vector3 startPos = mazeDensity.GetStartRoomCentre();
+                transform.localPosition = startPos;
+                
+                // Target Room placement (could be unrendered visually initially)
+                Vector3 exitPos = mazeDensity.GetExitRoomCentre();
+                target.localPosition = exitPos;
+            }
+            else
+            {
+                // Reset drone to the origin of its own environment root (local space).
+                transform.localPosition = new Vector3(8f, -13f, -10f);
+            }
+
+            transform.localRotation = _initRotation;
+            _rb.linearVelocity            = Vector3.zero;
+            _rb.angularVelocity     = Vector3.zero;
+            _sharedPhysics.SetControlInput(Vector2.zero, 0f, 0f);
+            _sharedPhysics.ResetRuntimeState();
+
+            _lidar?.ResetScan();
         }
 
-        transform.localRotation = _initRotation;
-        _rb.linearVelocity            = Vector3.zero;
-        _rb.angularVelocity     = Vector3.zero;
-        _sharedPhysics.SetControlInput(Vector2.zero, 0f, 0f);
-        _sharedPhysics.ResetRuntimeState();
+        _wallCollisionEndedEpisode = false;
 
-        _lidar?.ResetScan();
         _tracker.StartTracking(transform.position, target.position);
         _exploredLastStep = 0;
 
@@ -409,22 +425,39 @@ public class DroneAgent : Agent
         }
         
         // Room-Scale Target Recognition
+        bool targetReached = false;
+
         if (mazeDensity != null)
         {
             // Convert everything to world space if necessary, or keep everything in local space
             float dist = Vector3.Distance(transform.localPosition, mazeDensity.GetExitRoomCentre());
+            targetReached = dist <= mazeDensity.GetExitRoomSize();
+        }
+        else if (target != null)
+        {
+            float dist = Vector3.Distance(transform.position, target.position);
+            targetReached = dist <= targetReachedRadius;
+        }
+
+        if (targetReached)
+        {
+            transform.localRotation = _initRotation;
+            _rb.angularVelocity = Vector3.zero;
+
+            Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET (or ROOM) reached!");
+            AddReward(targetReward);
+
+            if (saveEpisodeResults && _tracker != null)
+                EpisodeResultSaver.SaveEpisodeResult(_tracker, _path, transform.position);
+
+            _tracker.StopTracking();
             
-            if (dist <= mazeDensity.GetExitRoomSize())
+            if (mazeDensity == null)
             {
-                Debug.Log($"[DroneAgent] Episode {_episodeCount}: WHOLE TARGET ROOM reached!");
-                AddReward(targetReward);
-
-                if (saveEpisodeResults && _tracker != null)
-                    EpisodeResultSaver.SaveEpisodeResult(_tracker, _path, transform.position);
-
-                _tracker.StopTracking();
-                EndEpisode();
+                RandomizeTarget();
             }
+            
+            EndEpisode();
         }
     }
 
@@ -437,33 +470,18 @@ public class DroneAgent : Agent
 
         try
         {
-            // 1. Remove the block that forces localRotation = _initRotation on "Wall"
-
-            if (other.CompareTag("Target"))
-            {
-                // Reset rotation ONLY when hitting the target, as the episode ends anyway
-                transform.localRotation = _initRotation;
-                _rb.angularVelocity     = Vector3.zero;
-
-                if (mazeDensity == null)
-                {
-                    Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET reached!");
-                    AddReward(targetReward);
-
-                    if (saveEpisodeResults && _tracker != null)
-                        EpisodeResultSaver.SaveEpisodeResult(_tracker, _path, transform.position);
-
-                    _tracker.StopTracking();
-                    RandomizeTarget();
-                    EndEpisode();
-                }
-            }
-            else if (other.CompareTag("Wall"))
+            // The logic for hitting the Target is now handled dynamically in OnActionReceived
+            // via a distance check so the drone doesn't need to physically collide with it.
+            
+            if (other.CompareTag("Wall"))
             {
                 Debug.Log($"[DroneAgent] Episode {_episodeCount}: Wall collision.");
                 
                 // Just add the penalty. The drone will bounce off naturally.
                 AddReward(wallPenalty);
+
+                _wallCollisionEndedEpisode = true;
+                EndEpisode();
             }
         }
         catch (UnityException)
