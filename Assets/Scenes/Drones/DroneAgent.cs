@@ -231,9 +231,9 @@ public class DroneAgent : Agent
             _rb.angularVelocity     = Vector3.zero;
             _sharedPhysics.SetControlInput(Vector2.zero, 0f, 0f);
             _sharedPhysics.ResetRuntimeState();
-
-            _lidar?.ResetScan();
         }
+
+        _lidar?.ResetScan();
 
         _wallCollisionEndedEpisode = false;
 
@@ -244,9 +244,9 @@ public class DroneAgent : Agent
             RecalculatePath();
 
         _timeSinceRepath = 0f;
-        Debug.Log($"[DroneAgent] Episode {_episodeCount} start " +
-                  $"(env: {(_envRoot != null ? _envRoot.name : "none")}). " +
-                  $"Path: {_path.Count} waypoints.");
+        // Debug.Log($"[DroneAgent] Episode {_episodeCount} start " +
+        //           $"(env: {(_envRoot != null ? _envRoot.name : "none")}). " +
+        //           $"Path: {_path.Count} waypoints.");
     }
 
     // ========================================================== Observations
@@ -444,7 +444,7 @@ public class DroneAgent : Agent
             transform.localRotation = _initRotation;
             _rb.angularVelocity = Vector3.zero;
 
-            Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET (or ROOM) reached!");
+            // Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET (or ROOM) reached!");
             AddReward(targetReward);
 
             if (saveEpisodeResults && _tracker != null)
@@ -475,7 +475,7 @@ public class DroneAgent : Agent
             
             if (other.CompareTag("Wall"))
             {
-                Debug.Log($"[DroneAgent] Episode {_episodeCount}: Wall collision.");
+                // Debug.Log($"[DroneAgent] Episode {_episodeCount}: Wall collision.");
                 
                 // Just add the penalty. The drone will bounce off naturally.
                 AddReward(wallPenalty);

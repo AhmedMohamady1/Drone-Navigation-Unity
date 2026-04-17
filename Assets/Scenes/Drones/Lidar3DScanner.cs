@@ -20,6 +20,7 @@ public class Lidar3DScanner : MonoBehaviour
     public Material pointCloudMaterial;
     public Color pointColor = Color.cyan;
     public bool colorByDistance = true;
+    public int maxPointsToKeep = 50000;
 
     [Header("Visualization")]
     public bool showScanningRays = true;
@@ -237,7 +238,20 @@ public class Lidar3DScanner : MonoBehaviour
             }
         }
 
+        EnforcePointLimit();
+
         lastScanTime = Time.time;
+    }
+
+    void EnforcePointLimit()
+    {
+        if (pointCloudVertices.Count > maxPointsToKeep)
+        {
+            int excess = pointCloudVertices.Count - maxPointsToKeep;
+            pointCloudVertices.RemoveRange(0, excess);
+            pointCloudNormals.RemoveRange(0, excess);
+            pointCloudColors.RemoveRange(0, excess);
+        }
     }
 
     Color GetDistanceColor(float distance)
@@ -257,7 +271,7 @@ public class Lidar3DScanner : MonoBehaviour
 
     void UpdatePointCloudVisualization()
     {
-        if (pointCloudVertices.Count == 0) return;
+        if (pointCloudVertices.Count == 0 || !showRealTimePointCloud) return;
 
         // Update mesh with all accumulated points
         pointCloudMesh.Clear();
@@ -335,7 +349,7 @@ public class Lidar3DScanner : MonoBehaviour
     {
         currentScanAngle = 0f;
         ClearPointCloud();
-        Debug.Log("Scan reset");
+        // Debug.Log("Scan reset");
     }
 
     public void ClearPointCloud()
@@ -344,7 +358,7 @@ public class Lidar3DScanner : MonoBehaviour
         pointCloudColors.Clear();
         pointCloudNormals.Clear();
         pointCloudMesh.Clear();
-        Debug.Log("Point cloud cleared");
+        // Debug.Log("Point cloud cleared");
     }
 
     public void ExportPointCloud()

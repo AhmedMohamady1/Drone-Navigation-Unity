@@ -308,10 +308,10 @@ public class AStarPathfinder : MonoBehaviour
             }
         }
 
-        if (iterations >= maxIterations)
-            Debug.LogWarning($"[A*] Pathfinding hit max iterations ({maxIterations}). Returning partial path {startPos} → {goalPos}.");
-        else
-            Debug.LogWarning($"[A*] No path found {startPos} → {goalPos}. Using direct line.");
+        // if (iterations >= maxIterations)
+        //     Debug.LogWarning($"[A*] Pathfinding hit max iterations ({maxIterations}). Returning partial path {startPos} → {goalPos}.");
+        // else
+        //     Debug.LogWarning($"[A*] No path found {startPos} → {goalPos}. Using direct line.");
             
         return ReconstructPath(closestNode);
     }
