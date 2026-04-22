@@ -9,7 +9,6 @@ using System.Collections.Generic;
 ///   • LiDAR point-cloud observations  (obstacle avoidance / environment sensing)
 ///   • A* waypoint direction           (guided exploration toward target)
 ///   • PathTracker history + transform (self-localisation & progress)
-///   • Explored-cell map               (discourages revisiting the same areas)
 ///
 /// Multi-environment support:
 ///   • The drone and target must both be children of the same environment root GameObject.
@@ -55,16 +54,27 @@ public class DroneAgent : Agent
     public float targetReachedRadius        = 7.0f;
 
     [Header("Rewards")]
-    public float stepPenalty            = -0.0003f;
-    public float wallPenalty            = -1f;
-    public float targetReward           = 25f;
-    public float progressRewardScale    = 0.01f;
-    public float noveltyRewardScale     = 0.005f;
-    public float outOfBoundsPenalty     = -1f;
-    public float headingAlignmentRewardScale = 0.0035f;
+    public float stepPenalty            = -0.001f;
+    public float wallPenalty            = -2f;
+    public float targetReward           = 10f;
+    public float distanceRewardScale    = 0.1f;
+    public float progressRewardScale    = 0.005f;
+    public float headingAlignmentRewardScale = 0.001f;
     public float excessYawRateThreshold      = 3.0f;
     public float excessYawRatePenaltyScale   = 0.0003f;
     public float choppyMovementPenalty       = -0.0001f;
+    public float timeoutPenalty         = -2f;
+    public float outOfBoundsPenalty     = -1f;
+
+    [Header("Episode Control")]
+    [Tooltip("Used only when Agent.MaxStep is 0 (unlimited).")]
+    public int fallbackMaxStep = 800;
+
+    [Header("Target Randomization")]
+    [Tooltip("Minimum absolute Y offset between drone start and randomized target in non-maze mode.")]
+    public float minTargetVerticalOffset = 2f;
+    [Tooltip("Maximum absolute Y offset between drone start and randomized target in non-maze mode.")]
+    public float maxTargetVerticalOffset = 6f;
 
     [Header("Episode Recording")]
     public bool saveEpisodeResults = true;
@@ -72,6 +82,10 @@ public class DroneAgent : Agent
     [Header("Maze Configuration")]
     [Tooltip("Optional. If provided, the drone will query this for start/exit rooms and regenerate it per episode.")]
     public MazeDensity mazeDensity;
+
+    [Header("Curriculum")]
+    [Tooltip("Number of episodes over which difficulty ramps from 1-hop target to full exit.")]
+    public int curriculumEpisodes = 3000;
 
     // --------------------------------------------------------- private
     private Rigidbody       _rb;
@@ -91,9 +105,14 @@ public class DroneAgent : Agent
     private int             _waypointIdx     = 0;
     private float           _timeSinceRepath = 0f;
     private int             _episodeCount    = 0;
-    private int             _exploredLastStep = 0;
     private float[]         _prevActions     = new float[4];
-    private bool            _wallCollisionEndedEpisode = false;
+    private float           _bestPathCompletion = 0f;
+    private float           _prevDistanceToTarget = 0f;
+
+    /// <summary>
+    /// Tracks the current curriculum graph distance used as target.
+    /// </summary>
+    private int             _curriculumTargetDist = 1;
 
     private void ApplySharedPhysicsSettings()
     {
@@ -117,6 +136,11 @@ public class DroneAgent : Agent
     {
         _sharedPhysics = GetComponent<SharedDronePhysics>();
         ApplySharedPhysicsSettings();
+
+        fallbackMaxStep = Mathf.Max(0, fallbackMaxStep);
+        minTargetVerticalOffset = Mathf.Max(0f, minTargetVerticalOffset);
+        maxTargetVerticalOffset = Mathf.Max(minTargetVerticalOffset, maxTargetVerticalOffset);
+        curriculumEpisodes = Mathf.Max(1, curriculumEpisodes);
     }
 
     // ================================================================ Init
@@ -199,46 +223,50 @@ public class DroneAgent : Agent
 
         _episodeCount++;
 
-        if (!_wallCollisionEndedEpisode)
+        if (mazeDensity != null)
         {
-            if (mazeDensity != null)
-            {
-                mazeDensity.RebuildImmediate();
+            mazeDensity.RebuildImmediate();
 
-                MeshGenerator meshGen = null;
-                if (_envRoot != null)
-                    meshGen = _envRoot.GetComponentInChildren<MeshGenerator>();
-                
-                if (meshGen != null)
-                    meshGen.RequestMeshUpdate();
+            MeshGenerator meshGen = null;
+            if (_envRoot != null)
+                meshGen = _envRoot.GetComponentInChildren<MeshGenerator>();
+            
+            if (meshGen != null)
+                meshGen.RequestMeshUpdate();
 
-                // Start Room placement
-                Vector3 startPos = mazeDensity.GetStartRoomCentre();
-                transform.localPosition = startPos;
-                
-                // Target Room placement (could be unrendered visually initially)
-                Vector3 exitPos = mazeDensity.GetExitRoomCentre();
-                target.localPosition = exitPos;
-            }
-            else
-            {
-                // Reset drone to the origin of its own environment root (local space).
-                transform.localPosition = new Vector3(8f, -13f, -10f);
-            }
+            // Start Room placement
+            Vector3 startPos = mazeDensity.GetStartRoomCentre();
+            transform.localPosition = startPos;
+            
+            // ── Curriculum target placement ──────────────────────────
+            // Ramp from 1-hop neighbour to full maze exit over curriculumEpisodes.
+            int maxDist = mazeDensity.GetMaxGraphDistance();
+            float progress = Mathf.Clamp01((float)_episodeCount / (float)curriculumEpisodes);
+            _curriculumTargetDist = Mathf.Clamp(
+                Mathf.CeilToInt(Mathf.Lerp(1f, maxDist, progress)),
+                1, maxDist);
 
-            transform.localRotation = _initRotation;
-            _rb.linearVelocity            = Vector3.zero;
-            _rb.angularVelocity     = Vector3.zero;
-            _sharedPhysics.SetControlInput(Vector2.zero, 0f, 0f);
-            _sharedPhysics.ResetRuntimeState();
+            Vector3 targetPos = mazeDensity.GetRoomCentreAtGraphDistance(_curriculumTargetDist);
+            target.localPosition = targetPos;
         }
+        else
+        {
+            // Reset drone to the origin of its own environment root (local space).
+            transform.localPosition = new Vector3(8f, -13f, -10f);
+            RandomizeTarget();
+        }
+
+        transform.localRotation = _initRotation;
+        _rb.linearVelocity            = Vector3.zero;
+        _rb.angularVelocity     = Vector3.zero;
+        _sharedPhysics.SetControlInput(Vector2.zero, 0f, 0f);
+        _sharedPhysics.ResetRuntimeState();
 
         _lidar?.ResetScan();
 
-        _wallCollisionEndedEpisode = false;
-
         _tracker.StartTracking(transform.position, target.position);
-        _exploredLastStep = 0;
+        _bestPathCompletion = 0f;
+        _prevDistanceToTarget = Vector3.Distance(transform.position, target.position);
 
         if (useAStarPathfinding && _astar != null)
             RecalculatePath();
@@ -246,6 +274,7 @@ public class DroneAgent : Agent
         _timeSinceRepath = 0f;
         // Debug.Log($"[DroneAgent] Episode {_episodeCount} start " +
         //           $"(env: {(_envRoot != null ? _envRoot.name : "none")}). " +
+        //           $"Curriculum dist: {_curriculumTargetDist}. " +
         //           $"Path: {_path.Count} waypoints.");
     }
 
@@ -263,9 +292,8 @@ public class DroneAgent : Agent
     //   1   remaining waypoints ratio
     //  60   last-20-step path history (20 × 3)
     //  32   LiDAR distances
-    // 125   explored-cell occupancy window (5×5×5)
     // ---
-    // 244  TOTAL
+    // 119  TOTAL
     public override void CollectObservations(VectorSensor sensor)
     {
         // 1. Target direction in drone-local frame (3) + distance (1)
@@ -314,12 +342,8 @@ public class DroneAgent : Agent
         float[] pathObs = _tracker.GetPathAsObservations(20);
         foreach (float v in pathObs) sensor.AddObservation(v);
 
-        // 6. LiDAR (64)
+        // 6. LiDAR (32)
         AddLidarObservations(sensor);
-
-        // 7. Explored-cell map (125)
-        float[] explored = _tracker.GetExploredMapObservations(transform.position, 3, 125);
-        foreach (float v in explored) sensor.AddObservation(v);
     }
 
     private void AddLidarObservations(VectorSensor sensor)
@@ -392,20 +416,25 @@ public class DroneAgent : Agent
             _timeSinceRepath = 0f;
         }
 
+        // ── Per-step time penalty ──
         AddReward(stepPenalty);
 
-        float completion = _tracker.GetPathCompletion();
-        if (completion > 0f)
-            AddReward(completion * progressRewardScale);
+        // ── Distance-to-target shaping (primary reward signal) ──
+        float currentDist = Vector3.Distance(transform.position, target.position);
+        float distanceDelta = _prevDistanceToTarget - currentDist; // positive = getting closer
+        AddReward(distanceDelta * distanceRewardScale);
+        _prevDistanceToTarget = currentDist;
 
-        int nowExplored = _tracker.GetExploredCellCount();
-        if (nowExplored > _exploredLastStep)
+        // ── A* waypoint progress (secondary signal) ──
+        float completion = _tracker.GetPathCompletion();
+        if (completion > _bestPathCompletion)
         {
-            AddReward((nowExplored - _exploredLastStep) * noveltyRewardScale);
-            _exploredLastStep = nowExplored;
+            float completionDelta = completion - _bestPathCompletion;
+            AddReward(completionDelta * progressRewardScale);
+            _bestPathCompletion = completion;
         }
 
-        // Encourage facing the target so behind-target episodes learn active yaw turns.
+        // ── Heading alignment (minor auxiliary signal) ──
         Vector3 toTargetWorld = target.position - transform.position;
         if (toTargetWorld.sqrMagnitude > 0.0001f)
         {
@@ -413,25 +442,27 @@ public class DroneAgent : Agent
             AddReward(headingAlignment * headingAlignmentRewardScale);
         }
 
+        // ── Excess yaw penalty ──
         float excessYawRate = Mathf.Abs(_rb.angularVelocity.y) - excessYawRateThreshold;
         if (excessYawRate > 0f)
             AddReward(-excessYawRate * excessYawRatePenaltyScale);
 
-        // Out-of-bounds check uses localPosition → works for every environment copy.
+        // ── Out-of-bounds check (uses localPosition → works for every env copy) ──
         if (transform.localPosition.y > 180f || transform.localPosition.y < -180f)
         {
             AddReward(outOfBoundsPenalty);
             EndEpisode();
         }
         
-        // Room-Scale Target Recognition
+        // ── Target Recognition ──
         bool targetReached = false;
 
         if (mazeDensity != null)
         {
-            // Convert everything to world space if necessary, or keep everything in local space
-            float dist = Vector3.Distance(transform.localPosition, mazeDensity.GetExitRoomCentre());
-            targetReached = dist <= mazeDensity.GetExitRoomSize();
+            Vector3 currTargetCentre = mazeDensity.GetRoomCentreAtGraphDistance(_curriculumTargetDist);
+            float currTargetSize = mazeDensity.GetRoomSizeAtGraphDistance(_curriculumTargetDist);
+            float dist = Vector3.Distance(transform.localPosition, currTargetCentre);
+            targetReached = dist <= currTargetSize;
         }
         else if (target != null)
         {
@@ -444,7 +475,7 @@ public class DroneAgent : Agent
             transform.localRotation = _initRotation;
             _rb.angularVelocity = Vector3.zero;
 
-            // Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET (or ROOM) reached!");
+            Debug.Log($"[DroneAgent] Episode {_episodeCount}: TARGET (or ROOM) reached! (curriculum dist: {_curriculumTargetDist})");
             AddReward(targetReward);
 
             if (saveEpisodeResults && _tracker != null)
@@ -458,7 +489,11 @@ public class DroneAgent : Agent
             }
             
             EndEpisode();
+            return;
         }
+
+        // No hard step timeout — the per-step penalty (stepPenalty) provides
+        // a soft incentive to finish quickly. Set MaxStep = 0 in Inspector.
     }
 
     // =========================================================== Collisions
@@ -475,34 +510,16 @@ public class DroneAgent : Agent
             
             if (other.CompareTag("Wall"))
             {
-                // Debug.Log($"[DroneAgent] Episode {_episodeCount}: Wall collision.");
-                
-                // Just add the penalty. The drone will bounce off naturally.
+                // Penalize wall collision but do NOT end the episode.
+                // The tunnels between rooms are narrow — the drone must learn to
+                // recover from grazes rather than being killed instantly.
                 AddReward(wallPenalty);
-
-                _wallCollisionEndedEpisode = true;
-                EndEpisode();
             }
         }
         catch (UnityException)
         {
             // Ignore tag undefined errors during collisions
         }
-    }
-
-    private void OnCollisionStay(Collision collision)
-    {
-        if (!isActiveAndEnabled) return;
-        
-        try
-        {
-            if (collision.gameObject.CompareTag("Wall"))
-            {
-                // Apply sustained small penalty for touching the wall
-                AddReward(wallPenalty * 0.1f); 
-            }
-        }
-        catch (UnityException) { }
     }
 
     // ============================================================= Helpers
@@ -521,10 +538,29 @@ public class DroneAgent : Agent
     /// </summary>
     private void RandomizeTarget()
     {
+        float x = Random.Range(-20f, 32f);
+        float z = Random.Range(-37f, 14f);
+
+        float minDelta = Mathf.Max(0f, minTargetVerticalOffset);
+        float maxDelta = Mathf.Max(minDelta, maxTargetVerticalOffset);
+        float signedDelta = Random.value < 0.5f
+            ? -Random.Range(minDelta, maxDelta)
+            : Random.Range(minDelta, maxDelta);
+
+        float baseY = transform.localPosition.y;
+        float y = Mathf.Clamp(baseY + signedDelta, -13f, -3f);
+
+        // If clamping collapsed the offset, force a meaningful vertical gap.
+        if (Mathf.Abs(y - baseY) < minDelta * 0.5f)
+        {
+            float forcedDelta = baseY <= -8f ? minDelta : -minDelta;
+            y = Mathf.Clamp(baseY + forcedDelta, -13f, -3f);
+        }
+
         target.localPosition = new Vector3(
-            Random.Range(-20f, 32f),
-            Random.Range(-13f,  -3f),
-            Random.Range(-37f, 14f));
+            x,
+            y,
+            z);
     }
 
     // ============================================================= Heuristic
